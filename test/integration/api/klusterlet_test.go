@@ -213,6 +213,126 @@ var _ = Describe("Klusterlet API test with WorkConfiguration", func() {
 	})
 })
 
+var _ = Describe("Klusterlet hosting-cluster report validation", func() {
+	var createdNames []string
+
+	createKlusterlet := func(spec operatorv1.KlusterletSpec) (*operatorv1.Klusterlet, error) {
+		name := fmt.Sprintf("hosting-report-%s", rand.String(5))
+		createdNames = append(createdNames, name)
+		return operatorClient.OperatorV1().Klusterlets().Create(context.TODO(), &operatorv1.Klusterlet{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec:       spec,
+		}, metav1.CreateOptions{})
+	}
+
+	BeforeEach(func() {
+		createdNames = nil
+	})
+
+	AfterEach(func() {
+		for _, name := range createdNames {
+			err := operatorClient.OperatorV1().Klusterlets().Delete(context.TODO(), name, metav1.DeleteOptions{})
+			Expect(apierrors.IsNotFound(err) || err == nil).To(BeTrue())
+		}
+	})
+
+	It("requires clusterName when reporting in a local mode", func() {
+		for _, mode := range []operatorv1.InstallMode{"", operatorv1.InstallModeDefault, operatorv1.InstallModeSingleton} {
+			_, err := createKlusterlet(operatorv1.KlusterletSpec{
+				DeployOption: operatorv1.KlusterletDeployOption{
+					Mode:                 mode,
+					ReportHostingCluster: operatorv1.ReportHostingClusterModeEnable,
+				},
+			})
+			Expect(apierrors.IsInvalid(err)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("spec.clusterName is required"))
+		}
+	})
+
+	It("requires managementClusterName when reporting in a hosted mode", func() {
+		for _, mode := range []operatorv1.InstallMode{operatorv1.InstallModeHosted, operatorv1.InstallModeSingletonHosted} {
+			_, err := createKlusterlet(operatorv1.KlusterletSpec{
+				DeployOption: operatorv1.KlusterletDeployOption{
+					Mode:                 mode,
+					ReportHostingCluster: operatorv1.ReportHostingClusterModeEnable,
+					Hosted:               &operatorv1.KlusterletHostedConfiguration{},
+				},
+			})
+			Expect(apierrors.IsInvalid(err)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("spec.deployOption.hosted.managementClusterName is required"))
+		}
+	})
+
+	It("rejects disabling ClusterClaim while reporting", func() {
+		for _, featureGateMode := range []operatorv1.FeatureGateModeType{"", operatorv1.FeatureGateModeTypeDisable} {
+			_, err := createKlusterlet(operatorv1.KlusterletSpec{
+				ClusterName: "spoke-a",
+				DeployOption: operatorv1.KlusterletDeployOption{
+					Mode:                 operatorv1.InstallModeDefault,
+					ReportHostingCluster: operatorv1.ReportHostingClusterModeEnable,
+				},
+				RegistrationConfiguration: &operatorv1.RegistrationConfiguration{
+					FeatureGates: []operatorv1.FeatureGate{{
+						Feature: "ClusterClaim",
+						Mode:    featureGateMode,
+					}},
+				},
+			})
+			Expect(apierrors.IsInvalid(err)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("ClusterClaim cannot be disabled"))
+		}
+	})
+
+	It("allows reporting with the default or explicitly enabled ClusterClaim setting", func() {
+		for _, featureGates := range [][]operatorv1.FeatureGate{
+			nil,
+			{{Feature: "ClusterClaim", Mode: operatorv1.FeatureGateModeTypeEnable}},
+		} {
+			_, err := createKlusterlet(operatorv1.KlusterletSpec{
+				ClusterName: "spoke-a",
+				DeployOption: operatorv1.KlusterletDeployOption{
+					Mode:                 operatorv1.InstallModeDefault,
+					ReportHostingCluster: operatorv1.ReportHostingClusterModeEnable,
+				},
+				RegistrationConfiguration: &operatorv1.RegistrationConfiguration{FeatureGates: featureGates},
+			})
+			Expect(err).NotTo(HaveOccurred())
+		}
+	})
+
+	It("allows ClusterClaim to be disabled when reporting is disabled", func() {
+		_, err := createKlusterlet(operatorv1.KlusterletSpec{
+			DeployOption: operatorv1.KlusterletDeployOption{
+				Mode:                 operatorv1.InstallModeDefault,
+				ReportHostingCluster: operatorv1.ReportHostingClusterModeDisable,
+			},
+			RegistrationConfiguration: &operatorv1.RegistrationConfiguration{
+				FeatureGates: []operatorv1.FeatureGate{{
+					Feature: "ClusterClaim",
+					Mode:    operatorv1.FeatureGateModeTypeDisable,
+				}},
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("rejects an update that removes a required hosting-cluster name", func() {
+		klusterlet, err := createKlusterlet(operatorv1.KlusterletSpec{
+			ClusterName: "spoke-a",
+			DeployOption: operatorv1.KlusterletDeployOption{
+				Mode:                 operatorv1.InstallModeDefault,
+				ReportHostingCluster: operatorv1.ReportHostingClusterModeEnable,
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		klusterlet.Spec.ClusterName = ""
+		_, err = operatorClient.OperatorV1().Klusterlets().Update(context.TODO(), klusterlet, metav1.UpdateOptions{})
+		Expect(apierrors.IsInvalid(err)).To(BeTrue())
+		Expect(err.Error()).To(ContainSubstring("spec.clusterName is required"))
+	})
+})
+
 var _ = Describe("Klusterlet v1 Enhanced API test", func() {
 	var klusterletName string
 
